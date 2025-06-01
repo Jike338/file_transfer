@@ -622,7 +622,12 @@ def accuracy_reward_mix(completions, solution, reward_type, **kwargs):
                                 int(bbox_match.group(4))]
                         # if iou(bbox, sol) > 0.5:
                         #     reward = 1.0
-                        reward = iou(bbox, ground_truth)
+                        if reward_type[0] == 'grounding' and (
+                                content.count('{') > 1 or content.count('}') > 1 or
+                                content.count(']') > 2 or content.count('[') > 2):
+                            reward = 0
+                        else:
+                            reward = iou(bbox, ground_truth)
                 else:
                     content_answer = content
             except Exception:
@@ -646,6 +651,60 @@ def accuracy_reward_mix(completions, solution, reward_type, **kwargs):
     else:
         sys.exit('error reward')
 
+
+
+def format_reward_adaptive_three_check_mix(completions, need_think, reward_type, **kwargs):
+    """Reward function that checks if the completion has a specific format."""
+    if reward_type[0]=='normal':
+        pattern1 = r"<check>.*?</check>\s*<think>.*?</think>\s*<answer>.*?</answer>"
+        pattern2 = r"<check>.*?</check>\s*<answer>.*?</answer>"
+    elif reward_type[0]=='grounding':
+        pattern1 = r"<check>.*?</check>\s*<think>.*?</think>\s*<answer>.*?\{.*\[\d+,\s*\d+,\s*\d+,\s*\d+\].*\}.*?</answer>"
+        pattern2 = r"<check>.*?</check>\s*<answer>.*?\{.*\[\d+,\s*\d+,\s*\d+,\s*\d+\].*\}.*?</answer>"
+    else:
+        sys.exit('error reward')
+
+    completion_contents = [completion[0]["content"] for completion in completions]
+    matches1 = [re.fullmatch(pattern1, content, re.DOTALL) for content in completion_contents]
+    matches2 = [re.fullmatch(pattern2, content, re.DOTALL) for content in completion_contents]
+    matches3 = [re.search(r'<check>(.*?)</check>', content) for content in completion_contents]
+    rewards = []
+    #print(need_think)
+    for i in range(len(matches1)):
+        if reward_type[0]=='grounding' and (completion_contents[i].count('{')>1 or completion_contents[i].count('}')>1 or completion_contents[i].count(']')>2 or completion_contents[i].count('[')>2):
+            rewards.append(0)
+        elif matches1[i] or matches2[i]:
+            if matches3[i]:
+                if matches3[i].group(1).strip() == 'need thinking'  and '<think>' in completion_contents[i]:
+                    if need_think[i]:
+                        rewards.append(1)
+                    else:
+                        rewards.append(-0.5)
+                elif matches3[i].group(1).strip() == 'not need thinking' and '<think>' not in completion_contents[i]:
+                    if need_think[i]:
+                        rewards.append(-0.5)
+                    else:
+                        rewards.append(1.)
+                else:
+                    rewards.append(0.0)
+            else:
+                rewards.append(0.0)
+        else:
+            rewards.append(0.0)
+
+        if os.getenv("DEBUG_MODE") == "True":
+            log_path = os.getenv("LOG_PATH1")
+            # local_rank = int(os.getenv("LOCAL_RANK", 0))
+            try:
+                with open(log_path, "a") as f:
+                    f.write(f"------------- Format reward: {rewards[i]} -------------\n")
+                    f.write(f"Content: {completion_contents[i]}\n")
+                    f.write(f"Need Think?: {need_think[i]}\n")
+                    f.write(f"reward type: {reward_type[i]}\n")
+            except:
+                pass
+    return rewards
+
 def format_reward_mix(completions, reward_type,**kwargs):
     """Reward function that checks if the completion has a specific format."""
     # since batch size is 1, the completions within a batch are with same reward type.
@@ -661,19 +720,28 @@ def format_reward_mix(completions, reward_type,**kwargs):
 
 
     matches = [re.fullmatch(pattern, content, re.DOTALL) for content in completion_contents]
+    rewards = []
     for i in range(len(matches)):
+        if reward_type[0]=='grounding' and (completion_contents[i].count('{')>1 or completion_contents[i].count('}')>1 or completion_contents[i].count(']')>2 or completion_contents[i].count('[')>2):
+            rewards.append(0)
+        else:
+            if matches[i]:
+                rewards.append(1)
+            else:
+                rewards.append(0.0)
+
         if os.getenv("DEBUG_MODE") == "True":
             log_path = os.getenv("LOG_PATH1")
             # local_rank = int(os.getenv("LOCAL_RANK", 0))
             try:
                 with open(log_path, "a") as f:
-                    f.write(f"------------- Format reward: {1.0 if matches[i] else 0.0} -------------\n")
+                    f.write(f"------------- Format reward: {rewards[i]} -------------\n")
                     f.write(f"Content: {completion_contents[i]}\n")
                     f.write(f"reward type: {reward_type[i]}\n")
             except:
                 pass
     #print(reward_type)
-    return [1.0 if match else 0.0 for match in matches]
+    return rewards
 
 
 
