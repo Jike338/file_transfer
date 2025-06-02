@@ -21,6 +21,109 @@ def iou(box1, box2):
     union = (box1[2] - box1[0]) * (box1[3] - box1[1]) + (box2[2] - box2[0]) * (box2[3] - box2[1]) - inter
     return float(inter) / union
 
+def direct_accuracy_reward_mix(completions, solution, reward_type, **kwargs):
+    if reward_type[0]=='normal':
+        #print('normal')
+        contents = [completion[0]["content"] for completion in completions]
+        rewards = []
+        current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+        for content, sol in zip(contents, solution):
+            reward = 0.0
+            # Try string matching
+            try:
+                # Extract answer from solution if it has think/answer tags
+                sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+                ground_truth = sol_match.group(1).strip() if sol_match else sol.strip()
+
+
+                #print(content_match.group(1).strip())
+                student_answer = content.strip()
+                #print(student_answer)
+                #print(student_answer, sol)
+                # Compare the extracted answers
+                if student_answer == ground_truth:
+                    reward = 1.0
+            except Exception:
+                pass  # Keep reward as 0.0 if both methods fail
+
+            # If float verification failed, try symbolic verification
+            if reward == 0.0:
+                try:
+                    answer = parse(content)
+                    if float(verify(answer, parse(sol))) > 0:
+                        reward = 1.0
+                except Exception:
+                    pass  # Continue to next verification method if this fails
+
+            rewards.append(reward)
+            if os.getenv("DEBUG_MODE") == "True":
+                log_path = os.getenv("LOG_PATH")
+                # local_rank = int(os.getenv("LOCAL_RANK", 0))
+                try:
+                    with open(log_path, "a") as f:
+                        f.write(f"------------- {current_time} Accuracy reward: {reward} -------------\n")
+                        f.write(f"Content: {content}\n")
+                        f.write(f"extract answer: {student_answer}\n")
+                        f.write(f"reward type: {reward_type[0]}\n")
+                        f.write(f"Solution: {sol}\n")
+                except:
+                    pass
+        return rewards
+    elif reward_type[0] == 'grounding':
+        #print('grounding')
+        """Calculate IoU reward between predicted bounding box from Qwen model and ground truth bounding box."""
+        contents = [completion[0]["content"] for completion in completions]
+        rewards = []
+        current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+
+        #current_time = datetime.now().strftime("%d-%H-%M-%S-%f")
+        answer_tag_pattern = r'<answer>(.*?)</answer>'
+        bbox_pattern = r'\[(\d+),\s*(\d+),\s*(\d+),\s*(\d+)]'
+        for content, sol in zip(contents, solution):
+            #print(content,sol)
+            reward = 0.0
+            # Try symbolic verification first
+            content_answer = content
+            try:
+                sol_match = re.search(r'<answer>(.*?)</answer>', sol)
+                ground_truth = ast.literal_eval(sol_match.group(1).strip() if sol_match else sol.strip())
+
+                content_answer = content.strip()
+                bbox_match = re.search(bbox_pattern, content_answer)
+                #print('???????????')
+                #print(bbox_match)
+                #print('???????????')
+                if bbox_match:
+                    bbox = [int(bbox_match.group(1)), int(bbox_match.group(2)), int(bbox_match.group(3)),
+                            int(bbox_match.group(4))]
+                    # if iou(bbox, sol) > 0.5:
+                    #     reward = 1.0
+                    if reward_type[0] == 'grounding' and (
+                            content.count('{') > 1 or content.count('}') > 1 or
+                            content.count(']') > 2 or content.count('[') > 2):
+                        reward = 0
+                    else:
+                        reward = iou(bbox, ground_truth)
+            except Exception:
+                pass  # Continue to next verification method if this fails
+
+            rewards.append(reward)
+            if os.getenv("DEBUG_MODE") == "True":
+                log_path = os.getenv("LOG_PATH")
+                # local_rank = int(os.getenv("LOCAL_RANK", 0))
+                with open(log_path, "a") as f1:
+                    #print('>>>>>>>>>>>>>>>>>>>>>')
+                    #print(content_answer)
+                    #print('>>>>>>>>>>>>>>>>>>>>>')
+                    f1.write(f"------------- {current_time} Accuracy reward: {reward} -------------\n")
+                    f1.write(f"Content: {content}\n")
+                    f1.write(f"extract answer: {content_answer}\n")
+                    f1.write(f"reward type: {reward_type[0]}\n")
+                    f1.write(f"Solution: {sol}\n")
+        return rewards
+    else:
+        sys.exit('error reward')
+        
 def direct_accuracy_reward(completions, solution, **kwargs):
     """Reward function that checks if the completion is correct using either symbolic verification or exact string matching."""
     contents = [completion[0]["content"] for completion in completions]
