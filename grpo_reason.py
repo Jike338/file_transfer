@@ -12,6 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from PIL import Image
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -26,6 +27,54 @@ from prompt import *
 from reward import *
 from trl import ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
+TRANCE_QUESTION_PROMPT_REASON = '''Your need to complete the spatial visual reasoning task according to the following rules.  
+
+Given the image of the initial state, the image of the final state, and the attributes of the initial objects, you should determine a transformation that can achieve the change of states.  
+
+The **attributes of the initial objects** are provided as a list of tuples in the following format:  
+**('object_id', 'shape', 'size', 'color', 'material')**  
+Each tuple represents an object and its properties in the initial state.  
+
+The transformation should be a sequence of functions with a length ranging from 1 to 4, where each function is represented as **'func(object_id, value)'**.  
+
+### Available functions and values:  
+
+1. **'change_size(object_id, value)'** - Changes the object to a new size relative to its initial size.  
+   - Possible values: `['small', 'medium', 'large']`  
+
+2. **'change_color(object_id, value)'** - Changes the object to a new color relative to its initial color.  
+   - Possible values: `['yellow', 'gray', 'cyan', 'blue', 'brown', 'green', 'red', 'purple']`  
+
+3. **'change_material(object_id, value)'** - Changes the object to a new material relative to its initial material.  
+   - Possible values: `['glass', 'metal', 'rubber']`  
+
+4. **'change_shape(object_id, value)'** - - Changes the object to a new shape relative to its initial shape.  
+   - Possible values: `['cube', 'sphere', 'cylinder']`  
+
+5. **'change_position(object_id, value)'** - Moves the object to a new position relative to its initial location.  
+   - Possible values: `['front', 'behind', 'left', 'right', 'front_left', 'front_right', 'behind_left', 'behind_right']`  
+   - 'front' means moving forward along the object's initial direction.  
+   - 'behind' means moving backward along the object's initial direction.  
+   - 'left' means moving to the left of the object's initial orientation.  
+   - 'right' means moving to the right of the object's initial orientation.  
+   - 'front_left' means moving diagonally toward the front and left of the initial location.  
+   - 'front_right' means moving diagonally toward the front and right of the initial location.  
+   - 'behind_left' means moving diagonally toward the behind and left of the initial location.  
+   - 'behind_right' means moving diagonally toward the behind and right of the initial location.
+
+### Output Format  
+
+You should first directly provides the user with the answer and then output the reasoning process internally. 
+The **answer** and **reasoning process** are enclosed within specific tags:  
+
+- **Final answer (sequence of functions only)**: Enclosed within `<answer>...</answer>`
+- **Reasoning process**: Enclosed within `<reason>...</reason>`  
+  
+
+Now, it's your turn!
+
+{Question} Please first output the answer in <answer> </answer> tags and then output a brief reasoning process in <reason> </reason> tags.
+'''
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +143,7 @@ def main(script_args, training_args, model_args):
         assert "length" not in script_args.reward_funcs, f"Length reward is not supported in trance Task."
         reward_funcs_registry = {
             "accuracy": only_full_func_accuracy_reward,
-            "format": format_reward,
+            "format": format_reward_reason,
             "reason": reasoning_steps_reward,
         }
     elif script_args.task_name == "trance-full-caption":
@@ -120,7 +169,7 @@ def main(script_args, training_args, model_args):
         QUESTION_PROMPT = CLEVR_MATH_QUESTION_PROMPT
         reward_funcs_registry = {
             "accuracy": accuracy_reward,
-            "format": format_reward,
+            "format": format_reward_reason,
             "reason": reasoning_steps_reward,
             "length": len_reward,
         }
@@ -129,7 +178,7 @@ def main(script_args, training_args, model_args):
         QUESTION_PROMPT = GEOQA_QUESTION_PROMPT
         reward_funcs_registry = {
             "accuracy": accuracy_reward, # math_accuracy_reward,
-            "format": format_reward,
+            "format": format_reward_reason,
             "reason": reasoning_steps_reward,
             "length": len_reward,
         }
@@ -144,26 +193,23 @@ def main(script_args, training_args, model_args):
         }
 
     reward_funcs_registry = {
-        "accuracy": accuracy_reward_mix,
-        "format": format_reward_mix,
-        "reason": reasoning_steps_reward,
-        "length": len_reward,
+        "accuracy": accuracy_reward,
+        "format": format_reward_reason,
     }
+
     # Get reward functions
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
-    #print(QUESTION_PROMPT)
 
     # Load the dataset
     if script_args.dataset_name.endswith('.json'):
-        #print(QUESTION_PROMPT)
         dataset = load_dataset('json', data_files=script_args.dataset_name)
         # Format into conversation (multi-image / single-image / text-only)
         def make_conversation(example, image_path=None, use_system_prompt=False,QUESTION_PROMPT=None):
-            #print(QUESTION_PROMPT)
-            #print(script_args.task_name)
             if script_args.task_name != "trance-only-full":
-                QUESTION_PROMPT = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
-            # multimodal sample
+                QUESTION_PROMPT = "{Question}\n Please first output the answer in <answer> </answer> tags and then output a brief reasoning process in <reason> </reason> tags."
+            else:
+                QUESTION_PROMPT = TRANCE_QUESTION_PROMPT_REASON
+        # multimodal sample
             if "image" in example and example["image"]:
                 if isinstance(example["image"], list):
                     images = []
@@ -224,16 +270,15 @@ def main(script_args, training_args, model_args):
                             {"role": "user", "content": QUESTION_PROMPT.format(Question=example["problem"])},
                         ],
                     }
-
-
+        
         dataset = dataset.map(partial(make_conversation, image_path=script_args.image_path, use_system_prompt=use_system_prompt,QUESTION_PROMPT=QUESTION_PROMPT))
     else:
-        #dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
+        # dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
         # Format into conversation (single-image / text-only)
         def make_conversation_sat(example, base_model_prompt=False):
-            QUESTION_TEMPLATE = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
+            QUESTION_TEMPLATE = "{Question}\n Please first output the answer in <answer> </answer> tags and then output a brief reasoning process in <reason> </reason> tags."
             if base_model_prompt:
-                image = Image.open(dataset_prefix +'data_images/'+ example["image"])
+                image = Image.open(dataset_prefix + 'data_images/' + example["image"])
                 question = example["messages"][0]["content"]
                 question = question.replace("<image>", "")
                 prompt = f'A conversation between User and Assistant. The user asks a question about the image, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer.\nUser: {question} \nAssistant: Let me solve this step by step.\n<think>'
@@ -245,21 +290,8 @@ def main(script_args, training_args, model_args):
                         "solution": "<answer>" + example["messages"][1]["content"] + "</answer>",
                         }
             else:
-                QUESTION_TEMPLATE = '{Question}\n Please output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
-                QUESTION_TEMPLATE_rec = '{Question}\n Please output the thinking process in <think> </think> and final answer in JSON format in <answer> </answer> tags.'
-                image = Image.open(example["image"])
-                if 'Thinklite' in example["image"]:
-                    need_think = True
-                else:
-                    need_think = False
-
-                if 'COCO' in example["image"]:
-                    solution = str(example['solution'])
-                    QUESTION_TEMPLATE = QUESTION_TEMPLATE_rec
-                    reward = 'grounding'
-                else:
-                    solution = example['solution']
-                    reward = 'normal'
+                QUESTION_TEMPLATE = "{Question}\n Please first output the answer in <answer> </answer> tags and then output a brief reasoning process in <reason> </reason> tags."
+                image = Image.open(dataset_prefix + 'data_images/' + example["image"])
                 return {"image": image,
                         "image_path": example["image"],
                         "prompt": [
@@ -272,24 +304,24 @@ def main(script_args, training_args, model_args):
                                 ],
                             },
                         ],
-                        "solution": "<answer>" + solution + "</answer>",
-                        "need_think": need_think,
-                        "reward_type": reward,
+                        "solution": "<answer>" + example['solution'] + "</answer>",
                         }
 
-        dataset_path = "/mnt/hwfile/gveval/liming/mix_task_v1.json"
+        dataset_prefix = "/mnt/hwfile/gveval/liming/math360k/MathV360K/"
+        dataset_path = "math_train.json"
 
         import json
         # load json file
-        with open(dataset_path, 'r') as f:
+        with open(dataset_prefix + dataset_path, 'r') as f:
             sat_dataset = json.load(f)
 
         dataset = [make_conversation_sat(sample) for sample in sat_dataset]
+        print(len(dataset))
         dataset = {'train': dataset}
 
     #for split in dataset:
-    ##    if "messages" in dataset[split].column_names:
-     #       dataset[split] = dataset[split].remove_columns("messages")
+    #    if "messages" in dataset[split].column_names:
+    #        dataset[split] = dataset[split].remove_columns("messages")
 
     # Initialize the GRPO trainer
     trainer = script_args.trainer_cls(

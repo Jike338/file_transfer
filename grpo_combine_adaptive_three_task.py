@@ -142,14 +142,15 @@ def main(script_args, training_args, model_args):
             "reason": reasoning_steps_reward,
             "length": len_reward,
         }
-
     reward_funcs_registry = {
-        "accuracy": accuracy_reward_mix,
-        "format": format_reward_mix,
+        "accuracy": accuracy_reward,
+        "format": format_reward_adaptive_three_task,
         "reason": reasoning_steps_reward,
         "length": len_reward,
     }
     # Get reward functions
+    script_args.reward_funcs = ["accuracy", "format"]
+
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
     #print(QUESTION_PROMPT)
 
@@ -208,7 +209,7 @@ def main(script_args, training_args, model_args):
                         ],
                         "image": images
                     }
-                
+
             # text-only sample
             else:
                 if use_system_prompt:
@@ -218,7 +219,7 @@ def main(script_args, training_args, model_args):
                             {"role": "user", "content": example["problem"]},
                         ],
                     }
-                else:
+                else: 
                     return {
                         "prompt": [
                             {"role": "user", "content": QUESTION_PROMPT.format(Question=example["problem"])},
@@ -230,8 +231,8 @@ def main(script_args, training_args, model_args):
     else:
         #dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
         # Format into conversation (single-image / text-only)
-        def make_conversation_sat(example, base_model_prompt=False):
-            QUESTION_TEMPLATE = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
+        def make_conversation_sat(example, dataset_prefix=None,base_model_prompt=False):
+            QUESTION_TEMPLATE = ''''{Question}\n Please first identify whether this problem requires intermediate thinking or not and output the results in <check> </check>. In <check> </check>, only output two cases: need thinking or not need thinking. If the problem requires thinking or calculation, output the thinking and calculation process inside <think> </think> tags and the final answer inside <answer> </answer> tags. If no thinking is required, directly output the final answer inside <answer> </answer> tags. Your output should follow one of two cases: (1) '<check> need thinking </check> <think> ... </think> <answer> ... </answer>' or (2) '<check> not need thinking </check> <answer> ... </answer>'. '''
             if base_model_prompt:
                 image = Image.open(dataset_prefix +'data_images/'+ example["image"])
                 question = example["messages"][0]["content"]
@@ -245,47 +246,72 @@ def main(script_args, training_args, model_args):
                         "solution": "<answer>" + example["messages"][1]["content"] + "</answer>",
                         }
             else:
-                QUESTION_TEMPLATE = '{Question}\n Please output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
-                QUESTION_TEMPLATE_rec = '{Question}\n Please output the thinking process in <think> </think> and final answer in JSON format in <answer> </answer> tags.'
-                image = Image.open(example["image"])
-                if 'Thinklite' in example["image"]:
-                    need_think = True
+                QUESTION_TEMPLATE = ''''{Question}\n Please first identify what kind of task of this problem and and output the results in <task> <task>. In <task> </task>, only output two cases: perception task or math task. Please follow that perception task problem do not need think and you need to directly output answer, and for math task problem, you may need reasoning or calculation to obtain final answers. Then identify whether this problem requires intermediate thinking or not and output the results in <check> </check>. In <check> </check>, only output two cases: need thinking or not need thinking. If the problem requires thinking or calculation, output the thinking and calculation process inside <think> </think> tags and the final answer inside <answer> </answer> tags. If no thinking is required, directly output the final answer inside <answer> </answer> tags. Your output should follow: \n <task> perception task </task> <check> not need thinking </check> <answer> ... </answer> \n <task> math task </task> <check> need thinking </check> <think> ... </think>  <answer> ... </answer>.'''
+                if "images" in example.keys() and 'SAT' in example["images"][0]:
+                    task = 'perception task'
+                    #print(task)
+                    image = Image.open(dataset_prefix + example["images"][0])
+                    return {"image": image,
+                            "image_path": example["images"][0],
+                            "prompt": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "image"},
+                                        {"type": "text",
+                                         "text": QUESTION_TEMPLATE.format(Question=example["messages"][0]["content"])},
+                                    ],
+                                },
+                            ],
+                            "solution": "<answer>" + example["messages"][1]["content"] + "</answer>",
+                            "task": task,
+                            }
                 else:
-                    need_think = False
+                    image = Image.open(dataset_prefix+ 'data_images/' + example["image"])
+                    task = 'math task'
+                    #print(task)
+                    return {"image": image,
+                            "image_path": example["image"],
+                            "prompt": [
+                                {
+                                    "role": "user",
+                                    "content": [
+                                        {"type": "image"},
+                                        {"type": "text",
+                                         "text": QUESTION_TEMPLATE.format(Question=example['problem'])},
+                                    ],
+                                },
+                            ],
+                            "solution": "<answer>" + example['solution'] + "</answer>",
+                            "task": task,
+                            }
 
-                if 'COCO' in example["image"]:
-                    solution = str(example['solution'])
-                    QUESTION_TEMPLATE = QUESTION_TEMPLATE_rec
-                    reward = 'grounding'
-                else:
-                    solution = example['solution']
-                    reward = 'normal'
-                return {"image": image,
-                        "image_path": example["image"],
-                        "prompt": [
-                            {
-                                "role": "user",
-                                "content": [
-                                    {"type": "image"},
-                                    {"type": "text",
-                                     "text": QUESTION_TEMPLATE.format(Question=example['problem'])},
-                                ],
-                            },
-                        ],
-                        "solution": "<answer>" + solution + "</answer>",
-                        "need_think": need_think,
-                        "reward_type": reward,
-                        }
+    dataset_prefix = "/mnt/hwfile/gveval/liming/math360k/MathV360K/"
+    dataset_path = "math_train.json"
 
-        dataset_path = "/mnt/hwfile/gveval/liming/mix_task_v1.json"
+    import json
+    # load json file
+    with open(dataset_prefix + dataset_path, 'r') as f:
+        sat_dataset = json.load(f)
 
-        import json
-        # load json file
-        with open(dataset_path, 'r') as f:
-            sat_dataset = json.load(f)
+    dataset0 = [make_conversation_sat(sample,dataset_prefix) for sample in sat_dataset]
+    print(len(dataset0))
+    #dataset = {'train': dataset}
 
-        dataset = [make_conversation_sat(sample) for sample in sat_dataset]
-        dataset = {'train': dataset}
+
+    dataset_prefix = "/mnt/hwfile/gveval/liming/new_data/"
+    dataset_path = "SAT_train_15000.json"
+
+    import json
+    # load json file
+    with open(dataset_prefix + dataset_path, 'r') as f:
+        sat_dataset = json.load(f)
+
+    dataset = [make_conversation_sat(sample,dataset_prefix) for sample in sat_dataset]+dataset0
+    import random
+    random.seed(100)
+    random.shuffle(dataset)
+    dataset = {'train': dataset}
 
     #for split in dataset:
     ##    if "messages" in dataset[split].column_names:

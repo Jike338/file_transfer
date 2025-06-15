@@ -143,14 +143,8 @@ def main(script_args, training_args, model_args):
             "length": len_reward,
         }
 
-    reward_funcs_registry = {
-        "accuracy": accuracy_reward_mix,
-        "format": format_reward_mix,
-        "reason": reasoning_steps_reward,
-        "length": len_reward,
-    }
     # Get reward functions
-    reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
+    reward_funcs = [direct_accuracy_reward]
     #print(QUESTION_PROMPT)
 
     # Load the dataset
@@ -162,7 +156,7 @@ def main(script_args, training_args, model_args):
             #print(QUESTION_PROMPT)
             #print(script_args.task_name)
             if script_args.task_name != "trance-only-full":
-                QUESTION_PROMPT = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
+                QUESTION_PROMPT = '{Question}\n Please directly output the answer.'
             # multimodal sample
             if "image" in example and example["image"]:
                 if isinstance(example["image"], list):
@@ -231,9 +225,9 @@ def main(script_args, training_args, model_args):
         #dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
         # Format into conversation (single-image / text-only)
         def make_conversation_sat(example, base_model_prompt=False):
-            QUESTION_TEMPLATE = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
+            QUESTION_PROMPT = '{Question}\n Please directly output the answer.'
             if base_model_prompt:
-                image = Image.open(dataset_prefix +'data_images/'+ example["image"])
+                image = Image.open(dataset_prefix + example["image"])
                 question = example["messages"][0]["content"]
                 question = question.replace("<image>", "")
                 prompt = f'A conversation between User and Assistant. The user asks a question about the image, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer.\nUser: {question} \nAssistant: Let me solve this step by step.\n<think>'
@@ -245,21 +239,8 @@ def main(script_args, training_args, model_args):
                         "solution": "<answer>" + example["messages"][1]["content"] + "</answer>",
                         }
             else:
-                QUESTION_TEMPLATE = '{Question}\n Please output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
-                QUESTION_TEMPLATE_rec = '{Question}\n Please output the thinking process in <think> </think> and final answer in JSON format in <answer> </answer> tags.'
-                image = Image.open(example["image"])
-                if 'Thinklite' in example["image"]:
-                    need_think = True
-                else:
-                    need_think = False
-
-                if 'COCO' in example["image"]:
-                    solution = str(example['solution'])
-                    QUESTION_TEMPLATE = QUESTION_TEMPLATE_rec
-                    reward = 'grounding'
-                else:
-                    solution = example['solution']
-                    reward = 'normal'
+                QUESTION_PROMPT = '{Question}\n Please directly output the answer.'
+                image = Image.open(dataset_prefix+ 'data_images/' + example["image"])
                 return {"image": image,
                         "image_path": example["image"],
                         "prompt": [
@@ -268,23 +249,22 @@ def main(script_args, training_args, model_args):
                                 "content": [
                                     {"type": "image"},
                                     {"type": "text",
-                                     "text": QUESTION_TEMPLATE.format(Question=example['problem'])},
+                                     "text": QUESTION_PROMPT.format(Question=example['problem'])},
                                 ],
                             },
                         ],
-                        "solution": "<answer>" + solution + "</answer>",
-                        "need_think": need_think,
-                        "reward_type": reward,
+                        "solution": "<answer>" + example['solution'] + "</answer>",
                         }
-
-        dataset_path = "/mnt/hwfile/gveval/liming/mix_task_v1.json"
+        dataset_prefix = "/mnt/hwfile/gveval/liming/math360k/MathV360K/"
+        dataset_path = "math_train.json"
 
         import json
         # load json file
-        with open(dataset_path, 'r') as f:
+        with open(dataset_prefix + dataset_path, 'r') as f:
             sat_dataset = json.load(f)
 
         dataset = [make_conversation_sat(sample) for sample in sat_dataset]
+        print(len(dataset))
         dataset = {'train': dataset}
 
     #for split in dataset:

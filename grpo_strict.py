@@ -11,7 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-from PIL import Image
+
 import logging
 import os
 from dataclasses import dataclass, field
@@ -143,26 +143,15 @@ def main(script_args, training_args, model_args):
             "length": len_reward,
         }
 
-    reward_funcs_registry = {
-        "accuracy": accuracy_reward_mix,
-        "format": format_reward_mix,
-        "reason": reasoning_steps_reward,
-        "length": len_reward,
-    }
     # Get reward functions
     reward_funcs = [reward_funcs_registry[func] for func in script_args.reward_funcs]
-    #print(QUESTION_PROMPT)
 
     # Load the dataset
     if script_args.dataset_name.endswith('.json'):
-        #print(QUESTION_PROMPT)
         dataset = load_dataset('json', data_files=script_args.dataset_name)
         # Format into conversation (multi-image / single-image / text-only)
-        def make_conversation(example, image_path=None, use_system_prompt=False,QUESTION_PROMPT=None):
-            #print(QUESTION_PROMPT)
-            #print(script_args.task_name)
-            if script_args.task_name != "trance-only-full":
-                QUESTION_PROMPT = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
+        def make_conversation(example, image_path=None, use_system_prompt=False):
+            QUESTION_PROMPT = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags. For example <think> .... </think>\n <answer> </answer>. Please strictly follow this format.'
             # multimodal sample
             if "image" in example and example["image"]:
                 if isinstance(example["image"], list):
@@ -224,72 +213,59 @@ def main(script_args, training_args, model_args):
                             {"role": "user", "content": QUESTION_PROMPT.format(Question=example["problem"])},
                         ],
                     }
-
-
-        dataset = dataset.map(partial(make_conversation, image_path=script_args.image_path, use_system_prompt=use_system_prompt,QUESTION_PROMPT=QUESTION_PROMPT))
+        
+        dataset = dataset.map(partial(make_conversation, image_path=script_args.image_path, use_system_prompt=use_system_prompt))
     else:
-        #dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
+        dataset = load_dataset(script_args.dataset_name, name=script_args.dataset_config)
         # Format into conversation (single-image / text-only)
-        def make_conversation_sat(example, base_model_prompt=False):
-            QUESTION_TEMPLATE = '{Question}\n Output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
-            if base_model_prompt:
-                image = Image.open(dataset_prefix +'data_images/'+ example["image"])
-                question = example["messages"][0]["content"]
-                question = question.replace("<image>", "")
-                prompt = f'A conversation between User and Assistant. The user asks a question about the image, and the Assistant solves it. The assistant first thinks about the reasoning process in the mind and then provides the user with the answer.\nUser: {question} \nAssistant: Let me solve this step by step.\n<think>'
-
-                return {"image": image,
+        def make_conversation_hf(example):
+            # multimodal sample
+            if "image" in example: # BUG Note: Not yet support for mix multimodal and text-only AND multi-images
+                if use_system_prompt:
+                    return {
                         "prompt": [
-                            {"type": "image"},
-                            {"type": "text", "text": "<image>" + prompt}],
-                        "solution": "<answer>" + example["messages"][1]["content"] + "</answer>",
-                        }
-            else:
-                QUESTION_TEMPLATE = '{Question}\n Please output the thinking process in <think> </think> and final answer in <answer> </answer> tags.'
-                QUESTION_TEMPLATE_rec = '{Question}\n Please output the thinking process in <think> </think> and final answer in JSON format in <answer> </answer> tags.'
-                image = Image.open(example["image"])
-                if 'Thinklite' in example["image"]:
-                    need_think = True
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image"},
+                                    {"type": "text", "text": example["problem"]},
+                                ],
+                            },
+                        ],
+                    }
                 else:
-                    need_think = False
-
-                if 'COCO' in example["image"]:
-                    solution = str(example['solution'])
-                    QUESTION_TEMPLATE = QUESTION_TEMPLATE_rec
-                    reward = 'grounding'
-                else:
-                    solution = example['solution']
-                    reward = 'normal'
-                return {"image": image,
-                        "image_path": example["image"],
+                    return {
                         "prompt": [
                             {
                                 "role": "user",
                                 "content": [
                                     {"type": "image"},
-                                    {"type": "text",
-                                     "text": QUESTION_TEMPLATE.format(Question=example['problem'])},
+                                    {"type": "text", "text": QUESTION_PROMPT.format(Question=example["problem"])},
                                 ],
                             },
                         ],
-                        "solution": "<answer>" + solution + "</answer>",
-                        "need_think": need_think,
-                        "reward_type": reward,
-                        }
+                    }
+            # text-only sample
+            else:
+                if use_system_prompt:
+                    return {
+                        "prompt": [
+                            {"role": "system", "content": SYSTEM_PROMPT},
+                            {"role": "user", "content": example["problem"]},
+                        ],
+                    }
+                else:
+                    return {
+                        "prompt": [
+                            {"role": "user", "content": QUESTION_PROMPT.format(Question=example["problem"])},
+                        ],
+                    }
+        dataset = dataset.map(make_conversation_hf)
 
-        dataset_path = "/mnt/hwfile/gveval/liming/mix_task_v1.json"
-
-        import json
-        # load json file
-        with open(dataset_path, 'r') as f:
-            sat_dataset = json.load(f)
-
-        dataset = [make_conversation_sat(sample) for sample in sat_dataset]
-        dataset = {'train': dataset}
-
-    #for split in dataset:
-    ##    if "messages" in dataset[split].column_names:
-     #       dataset[split] = dataset[split].remove_columns("messages")
+    for split in dataset:
+        if "messages" in dataset[split].column_names:
+            dataset[split] = dataset[split].remove_columns("messages")
 
     # Initialize the GRPO trainer
     trainer = script_args.trainer_cls(
